@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "pnpm --filter functions serve",
     "deploy": "pnpm exec firebase deploy --only functions",
+    "test": "pnpm --filter functions test",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
