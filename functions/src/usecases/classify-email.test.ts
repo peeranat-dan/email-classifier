@@ -43,8 +43,22 @@ const kbankSlip = () =>
     subject: 'Result of Bill Payment (Success)',
   });
 
+const USAGE: anthropic.Usage = {
+  model: 'claude-haiku-5-5',
+  inputTokens: 600,
+  outputTokens: 50,
+  cacheWriteTokens: 0,
+  cacheReadTokens: 0,
+  costUsd: 0.000085,
+};
+
 function llmSays(category: anthropic.Category, confidence = 0.95) {
-  vi.mocked(anthropic.classifyEmail).mockResolvedValue({ category, confidence, reason: 'because' });
+  vi.mocked(anthropic.classifyEmail).mockResolvedValue({
+    category,
+    confidence,
+    reason: 'because',
+    usage: USAGE,
+  });
 }
 
 beforeEach(() => {
@@ -268,6 +282,7 @@ describe('classifyEmail', () => {
         markRead: true,
         reason: 'because',
         confidence: 0.9,
+        usage: USAGE,
       });
     });
 
@@ -281,6 +296,40 @@ describe('classifyEmail', () => {
         MESSAGE_ID,
         expect.objectContaining({ outcome: 'kept', label: 'AI/WouldArchive' }),
       );
+    });
+  });
+
+  describe('usage tracking', () => {
+    it('records the usage of an LLM call', async () => {
+      llmSays('action');
+
+      await classifyEmail(MESSAGE_ID);
+
+      expect(db.recordUsage).toHaveBeenCalledExactlyOnceWith(USAGE);
+    });
+
+    it('records nothing when a rule decides', async () => {
+      vi.mocked(gmail.getEmail).mockResolvedValue(kbankSlip());
+
+      await classifyEmail(MESSAGE_ID);
+
+      expect(db.recordUsage).not.toHaveBeenCalled();
+    });
+
+    it('still counts a call whose email then fails to update', async () => {
+      llmSays('action');
+      vi.mocked(gmail.applyChanges).mockRejectedValue(new Error('gmail is down'));
+
+      await expect(classifyEmail(MESSAGE_ID)).rejects.toThrow();
+
+      expect(db.recordUsage).toHaveBeenCalledExactlyOnceWith(USAGE);
+    });
+
+    it('classifies the email even when recording usage fails', async () => {
+      llmSays('action');
+      vi.mocked(db.recordUsage).mockRejectedValue(new Error('firestore is down'));
+
+      await expect(classifyEmail(MESSAGE_ID)).resolves.toMatchObject({ label: 'AI/Action' });
     });
   });
 

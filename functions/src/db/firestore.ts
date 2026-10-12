@@ -1,7 +1,11 @@
 import { FieldValue, getFirestore, type Timestamp } from 'firebase-admin/firestore';
 
+import type { Usage } from '../services/anthropic.js';
+
 const syncDoc = () => getFirestore().doc('sync/gmail');
 const processedDoc = (id: string) => getFirestore().doc(`processed/${id}`);
+
+const usageDoc = (day: string) => getFirestore().doc(`usage/${day}`);
 
 export async function getHistoryId(): Promise<string | null> {
   const snap = await syncDoc().get();
@@ -64,4 +68,25 @@ export async function completeMessage(
 export async function failMessage(messageId: string, err: unknown): Promise<void> {
   const error = err instanceof Error ? err.message : String(err);
   await processedDoc(messageId).set({ status: 'failed', error }, { merge: true });
+}
+
+/** Adds one LLM call to the day's totals. Days are UTC, like the Anthropic console. */
+export async function recordUsage(usage: Usage): Promise<void> {
+  const totals = {
+    calls: FieldValue.increment(1),
+    inputTokens: FieldValue.increment(usage.inputTokens),
+    outputTokens: FieldValue.increment(usage.outputTokens),
+    cacheWriteTokens: FieldValue.increment(usage.cacheWriteTokens),
+    cacheReadTokens: FieldValue.increment(usage.cacheReadTokens),
+    // A call without a known price is counted apart, so costUsd is never silently too low
+    ...(usage.costUsd === null
+      ? { unpricedCalls: FieldValue.increment(1) }
+      : { costUsd: FieldValue.increment(usage.costUsd) }),
+  };
+
+  const day = new Date().toISOString().slice(0, 10);
+  await usageDoc(day).set(
+    { ...totals, byModel: { [usage.model]: totals }, updatedAt: FieldValue.serverTimestamp() },
+    { merge: true },
+  );
 }

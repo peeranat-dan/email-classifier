@@ -1,3 +1,5 @@
+import * as logger from 'firebase-functions/logger';
+
 import { params } from '../config.js';
 import * as db from '../db/firestore.js';
 import * as anthropic from '../services/anthropic.js';
@@ -23,6 +25,7 @@ interface Decision {
   markRead: boolean;
   reason: string;
   confidence?: number;
+  usage?: anthropic.Usage;
 }
 
 export async function classifyEmail(messageId: string) {
@@ -94,7 +97,13 @@ async function decide(email: gmail.EmailSummary): Promise<Decision> {
   }
 
   const result = await anthropic.classifyEmail(email);
-  const base = { source: 'llm', reason: result.reason, confidence: result.confidence } as const;
+  await recordUsage(result.usage);
+  const base = {
+    source: 'llm',
+    reason: result.reason,
+    confidence: result.confidence,
+    usage: result.usage,
+  } as const;
 
   if (result.confidence < Number(params.minConfidence.value())) {
     return { ...base, label: LABELS.unsure, archive: false, markRead: false };
@@ -107,6 +116,15 @@ async function decide(email: gmail.EmailSummary): Promise<Decision> {
       return { ...base, label: LABELS.read, archive: false, markRead: false };
     case 'archive':
       return { ...base, label: LABELS.archived, archive: true, markRead: true };
+  }
+}
+
+/** Recorded right after the call, so a later failure and retry still counts both calls. */
+async function recordUsage(usage: anthropic.Usage): Promise<void> {
+  try {
+    await db.recordUsage(usage);
+  } catch (err) {
+    logger.warn('Failed to record LLM usage', { usage, err }); // tracking must not block triage
   }
 }
 
