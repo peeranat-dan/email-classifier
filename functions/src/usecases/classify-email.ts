@@ -2,7 +2,7 @@ import { params } from '../config.js';
 import * as db from '../db/firestore.js';
 import * as anthropic from '../services/anthropic.js';
 import * as gmail from '../services/gmail.js';
-import { matchRule } from './rules.js';
+import { IGNORE_RULES, matchRule, RULES } from './rules.js';
 
 /** Auto/* is decided without the LLM (rules, protected senders); AI/* is an LLM decision. */
 const LABELS = {
@@ -39,6 +39,17 @@ export async function classifyEmail(messageId: string) {
       return { status: 'skipped' };
     }
 
+    const ignored = matchRule(email, IGNORE_RULES);
+    if (ignored) {
+      await db.completeMessage(messageId, {
+        from: email.fromAddress,
+        subject: email.subject,
+        outcome: 'skipped',
+        reason: `ignore: ${ignored.name}`,
+      });
+      return { status: 'skipped' };
+    }
+
     const decision = applyShadowMode(await decide(email));
 
     await gmail.applyChanges(messageId, {
@@ -71,7 +82,7 @@ async function decide(email: gmail.EmailSummary): Promise<Decision> {
     };
   }
 
-  const rule = matchRule(email);
+  const rule = matchRule(email, RULES);
   if (rule) {
     return {
       source: 'rule',

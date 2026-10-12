@@ -14,8 +14,19 @@ export const RULES: Rule[] = [
   },
 ];
 
-export function matchRule(email: { fromAddress: string; subject: string }): Rule | undefined {
-  return RULES.find(
+/** Matching mail is left exactly as it arrived: no label, not marked read, no LLM call. */
+export const IGNORE_RULES: Rule[] = [
+  {
+    name: 'google-calendar-notification',
+    from: /^calendar-notification@google\.com$/,
+  },
+];
+
+export function matchRule(
+  email: { fromAddress: string; subject: string },
+  rules: Rule[],
+): Rule | undefined {
+  return rules.find(
     (rule) =>
       (rule.from || rule.subject) &&
       (!rule.from || rule.from.test(email.fromAddress)) &&

@@ -91,6 +91,28 @@ describe('classifyEmail', () => {
     });
   });
 
+  describe('ignored mail', () => {
+    it('leaves it untouched without asking the LLM', async () => {
+      vi.mocked(gmail.getEmail).mockResolvedValue(
+        inboxEmail({
+          fromAddress: 'calendar-notification@google.com',
+          subject: 'Daily Agenda for Peeranat Danaidusadeekul as of 5am',
+        }),
+      );
+
+      await expect(classifyEmail(MESSAGE_ID)).resolves.toEqual({ status: 'skipped' });
+
+      expect(anthropic.classifyEmail).not.toHaveBeenCalled();
+      expect(gmail.applyChanges).not.toHaveBeenCalled();
+      expect(db.completeMessage).toHaveBeenCalledWith(MESSAGE_ID, {
+        from: 'calendar-notification@google.com',
+        subject: 'Daily Agenda for Peeranat Danaidusadeekul as of 5am',
+        outcome: 'skipped',
+        reason: 'ignore: google-calendar-notification',
+      });
+    });
+  });
+
   describe('protected senders', () => {
     it('keeps mail from an exact address without asking the LLM', async () => {
       settings.neverArchive = ['friend@example.com'];
