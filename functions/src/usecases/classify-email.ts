@@ -95,7 +95,7 @@ async function decide(email: gmail.EmailSummary): Promise<Decision> {
     case 'important':
       return { ...base, label: LABELS.read, archive: false, markRead: false };
     case 'archive':
-      return { ...base, label: LABELS.archived, archive: true, markRead: false };
+      return { ...base, label: LABELS.archived, archive: true, markRead: true };
   }
 }
 

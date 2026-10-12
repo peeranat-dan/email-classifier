@@ -168,11 +168,11 @@ describe('classifyEmail', () => {
 
         await classifyEmail(MESSAGE_ID);
 
-        // Unlike a rule, an LLM archive leaves the email unread
+        // An archived email is marked read; one kept in the inbox stays unread
         expect(gmail.applyChanges).toHaveBeenCalledWith(MESSAGE_ID, {
           addLabels: [label],
           archive,
-          markRead: false,
+          markRead: archive,
         });
       },
     );
@@ -243,7 +243,7 @@ describe('classifyEmail', () => {
         source: 'llm',
         label: 'AI/Archived',
         archive: true,
-        markRead: false,
+        markRead: true,
         reason: 'because',
         confidence: 0.9,
       });
