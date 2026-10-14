@@ -14,6 +14,7 @@ const settings = vi.hoisted(() => ({
 
 vi.mock('../config.js', () => ({
   params: {
+    gmailAddress: { value: () => 'Me@example.com' },
     shadowMode: { value: () => settings.shadowMode },
     minConfidence: { value: () => settings.minConfidence },
     neverArchive: { value: () => settings.neverArchive },
@@ -102,6 +103,31 @@ describe('classifyEmail', () => {
 
       expect(anthropic.classifyEmail).not.toHaveBeenCalled();
       expect(gmail.applyChanges).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('our own weekly summary', () => {
+    it('leaves it untouched without asking the LLM', async () => {
+      vi.mocked(gmail.getEmail).mockResolvedValue(
+        inboxEmail({
+          fromAddress: 'me@example.com',
+          subject: '[email-classifier] Weekly summary: 3 archived, 1 kept (4 Oct - 11 Oct)',
+        }),
+      );
+
+      await expect(classifyEmail(MESSAGE_ID)).resolves.toEqual({ status: 'skipped' });
+
+      expect(anthropic.classifyEmail).not.toHaveBeenCalled();
+      expect(gmail.applyChanges).not.toHaveBeenCalled();
+    });
+
+    it('still classifies the same subject from someone else', async () => {
+      vi.mocked(gmail.getEmail).mockResolvedValue(
+        inboxEmail({ subject: '[email-classifier] Weekly summary: free money' }),
+      );
+      llmSays('archive');
+
+      await expect(classifyEmail(MESSAGE_ID)).resolves.toMatchObject({ source: 'llm' });
     });
   });
 

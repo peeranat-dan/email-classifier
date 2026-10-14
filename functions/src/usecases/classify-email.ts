@@ -5,6 +5,7 @@ import * as db from '../db/firestore.js';
 import * as anthropic from '../services/anthropic.js';
 import * as gmail from '../services/gmail.js';
 import { IGNORE_RULES, matchRule, RULES } from './rules.js';
+import { SUMMARY_SUBJECT_PREFIX } from './weekly-summary.js';
 
 /** Auto/* is decided without the LLM (rules, protected senders); AI/* is an LLM decision. */
 const LABELS = {
@@ -39,6 +40,11 @@ export async function classifyEmail(messageId: string) {
 
     if (!email || !email.labelIds.includes('INBOX')) {
       await db.completeMessage(messageId, { outcome: 'skipped' });
+      return { status: 'skipped' };
+    }
+
+    if (isWeeklySummary(email)) {
+      await db.completeMessage(messageId, { outcome: 'skipped', reason: 'weekly summary' });
       return { status: 'skipped' };
     }
 
@@ -133,6 +139,14 @@ function applyShadowMode(decision: Decision): Decision {
   if (!decision.archive || !params.shadowMode.value()) return decision;
   const label = decision.source === 'llm' ? LABELS.wouldArchive : LABELS.autoWouldArchive;
   return { ...decision, label, archive: false, markRead: false };
+}
+
+/** Our own summary lands in the inbox too; it must not be triaged. */
+function isWeeklySummary(email: gmail.EmailSummary): boolean {
+  return (
+    email.fromAddress === params.gmailAddress.value().toLowerCase() &&
+    email.subject.startsWith(SUMMARY_SUBJECT_PREFIX)
+  );
 }
 
 function isProtectedSender(address: string): boolean {

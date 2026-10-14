@@ -19,7 +19,7 @@ export async function saveHistoryId(historyId: string): Promise<void> {
 // Handler timeout is 120s, so an older claim means the instance died mid-flight
 const STALE_CLAIM_MS = 5 * 60_000;
 // Pub/Sub retry has no built-in cap, so count attempts per message
-const MAX_ATTEMPTS = 5;
+export const MAX_ATTEMPTS = 5;
 
 export type ClaimResult = 'claimed' | 'duplicate' | 'exhausted';
 
@@ -68,6 +68,34 @@ export async function completeMessage(
 export async function failMessage(messageId: string, err: unknown): Promise<void> {
   const error = err instanceof Error ? err.message : String(err);
   await processedDoc(messageId).set({ status: 'failed', error }, { merge: true });
+}
+
+/** One processed/{messageId} document, as read back for the weekly summary. */
+export interface ProcessedRecord {
+  id: string;
+  status: 'processing' | 'done' | 'failed';
+  attempts?: number;
+  outcome?: 'archived' | 'kept' | 'skipped';
+  from?: string;
+  subject?: string;
+  label?: string;
+  reason?: string;
+  confidence?: number;
+  error?: string;
+}
+
+/** Emails finished since `since`, plus every email currently failing. */
+export async function listProcessedSince(since: Date): Promise<ProcessedRecord[]> {
+  const processed = getFirestore().collection('processed');
+  // Single-field filters, so neither query needs a composite index
+  const [done, failed] = await Promise.all([
+    processed.where('doneAt', '>=', since).get(),
+    processed.where('status', '==', 'failed').get(),
+  ]);
+
+  return [...done.docs, ...failed.docs].map(
+    (doc) => ({ id: doc.id, ...doc.data() }) as ProcessedRecord,
+  );
 }
 
 /** Adds one LLM call to the day's totals. Days are UTC, like the Anthropic console. */
