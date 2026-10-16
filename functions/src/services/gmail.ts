@@ -34,21 +34,45 @@ export async function watch(topicName: string): Promise<{ historyId: string; exp
   };
 }
 
+/** Net label changes on one message over a sync window. Label ids, not names. */
+export interface LabelChange {
+  messageId: string;
+  added: string[];
+  removed: string[];
+}
+
+export interface MailboxChanges {
+  /** New messages that arrived in the inbox. */
+  messageIds: string[];
+  /** Label changes on any message, by the user or by this service. */
+  labelChanges: LabelChange[];
+  latestHistoryId: string;
+}
+
 /** null when startHistoryId is too old for Gmail to replay. */
-export async function listInboxAdditions(
-  startHistoryId: string,
-): Promise<{ messageIds: string[]; latestHistoryId: string } | null> {
+export async function listChanges(startHistoryId: string): Promise<MailboxChanges | null> {
   const messageIds = new Set<string>();
+  const labels = new Map<string, { added: Set<string>; removed: Set<string> }>();
   let latestHistoryId = startHistoryId;
   let pageToken: string | undefined;
 
+  // Records come oldest first, so a later change cancels an earlier opposite one
+  const track = (id: string, labelIds: string[], added: boolean) => {
+    const entry = labels.get(id) ?? { added: new Set<string>(), removed: new Set<string>() };
+    labels.set(id, entry);
+    for (const label of labelIds) {
+      const [into, from] = added ? [entry.added, entry.removed] : [entry.removed, entry.added];
+      if (!from.delete(label)) into.add(label);
+    }
+  };
+
   try {
     do {
+      // No labelId filter: archiving or trashing removes INBOX, which a filter would hide
       const res = await gmail().users.history.list({
         userId: 'me',
         startHistoryId,
-        historyTypes: ['messageAdded'],
-        labelId: 'INBOX',
+        historyTypes: ['messageAdded', 'labelAdded', 'labelRemoved'],
         pageToken,
       });
 
@@ -56,6 +80,12 @@ export async function listInboxAdditions(
         for (const added of record.messagesAdded ?? []) {
           const msg = added.message;
           if (msg?.id && msg.labelIds?.includes('INBOX')) messageIds.add(msg.id);
+        }
+        for (const change of record.labelsAdded ?? []) {
+          if (change.message?.id) track(change.message.id, change.labelIds ?? [], true);
+        }
+        for (const change of record.labelsRemoved ?? []) {
+          if (change.message?.id) track(change.message.id, change.labelIds ?? [], false);
         }
       }
 
@@ -67,7 +97,15 @@ export async function listInboxAdditions(
     throw err;
   }
 
-  return { messageIds: [...messageIds], latestHistoryId };
+  const labelChanges = [...labels]
+    .map(([messageId, { added, removed }]) => ({
+      messageId,
+      added: [...added],
+      removed: [...removed],
+    }))
+    .filter((c) => c.added.length > 0 || c.removed.length > 0);
+
+  return { messageIds: [...messageIds], labelChanges, latestHistoryId };
 }
 
 /** null when the message was deleted before we got to it. */
@@ -150,6 +188,18 @@ async function getOrCreateLabelId(name: string): Promise<string> {
 async function findLabelId(name: string): Promise<string | undefined> {
   const res = await gmail().users.labels.list({ userId: 'me' });
   return res.data.labels?.find((l) => l.name === name)?.id ?? undefined;
+}
+
+/** System labels (INBOX, TRASH, ...) keep their id; user labels are looked up. */
+export async function getLabelNames(ids: string[]): Promise<string[]> {
+  const known = () => new Map([...labelIdCache].map(([name, id]) => [id, name]));
+  let names = known();
+  if (ids.some((id) => id.startsWith('Label_') && !names.has(id))) {
+    const res = await gmail().users.labels.list({ userId: 'me' });
+    for (const l of res.data.labels ?? []) if (l.name && l.id) cacheLabel(l.name, l.id);
+    names = known();
+  }
+  return ids.map((id) => names.get(id) ?? id);
 }
 
 function cacheLabel(name: string, id: string): string {

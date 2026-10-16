@@ -5,6 +5,7 @@ export const REGION = 'asia-southeast1';
 export const TOPICS = {
   gmailNotifications: 'gmail-notifications',
   classifyEmail: 'email-classify',
+  emailFeedback: 'email-feedback',
 } as const;
 
 export const secrets = {

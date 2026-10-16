@@ -1,11 +1,15 @@
 import { FieldValue, getFirestore, type Timestamp } from 'firebase-admin/firestore';
 
-import type { Usage } from '../services/anthropic.js';
+import type { Correction, FeedbackExample, LearnedHistory, Usage } from '../services/anthropic.js';
 
 const syncDoc = () => getFirestore().doc('sync/gmail');
 const processedDoc = (id: string) => getFirestore().doc(`processed/${id}`);
 
 const usageDoc = (day: string) => getFirestore().doc(`usage/${day}`);
+const feedbackDoc = (id: string) => getFirestore().doc(`feedback/${id}`);
+// Addresses may hold characters a document id cannot, like '/'
+const senderDoc = (address: string) => getFirestore().doc(`senders/${encodeURIComponent(address)}`);
+const domainDoc = (domain: string) => getFirestore().doc(`domains/${encodeURIComponent(domain)}`);
 
 export async function getHistoryId(): Promise<string | null> {
   const snap = await syncDoc().get();
@@ -89,4 +93,83 @@ export async function recordUsage(usage: Usage): Promise<void> {
     { ...totals, byModel: { [usage.model]: totals }, updatedAt: FieldValue.serverTimestamp() },
     { merge: true },
   );
+}
+
+/** What classify-email logged about a message, or null if it never got that far. */
+export interface ProcessedMessage {
+  status: 'processing' | 'done' | 'failed';
+  outcome?: 'archived' | 'kept' | 'skipped';
+  source?: 'protected' | 'rule' | 'learned' | 'llm';
+  label?: string;
+  archive?: boolean;
+  from?: string;
+  subject?: string;
+}
+
+export async function getProcessed(messageId: string): Promise<ProcessedMessage | null> {
+  const snap = await processedDoc(messageId).get();
+  return snap.exists ? (snap.data() as ProcessedMessage) : null;
+}
+
+export interface Feedback extends FeedbackExample {
+  source: string;
+  signal: string;
+}
+
+// Enough for the prompt to show a pattern, small enough to keep the call cheap
+const MAX_EXAMPLES = 5;
+
+/**
+ * Stores the user's correction and folds it into the sender's (and domain's) history.
+ * Returns false when the same correction was already recorded, e.g. a redelivery.
+ */
+export async function recordFeedback(
+  feedback: Feedback,
+  keys: { sender: string; domain: string | null },
+): Promise<boolean> {
+  const db = getFirestore();
+  const ref = feedbackDoc(feedback.messageId);
+  const historyRefs = [senderDoc(keys.sender), ...(keys.domain ? [domainDoc(keys.domain)] : [])];
+
+  return db.runTransaction(async (tx) => {
+    const [prev, ...histories] = await Promise.all([ref, ...historyRefs].map((r) => tx.get(r)));
+    const previous = prev.exists ? (prev.get('corrected') as Correction) : undefined;
+    if (previous === feedback.corrected) return false;
+
+    const example: FeedbackExample = {
+      messageId: feedback.messageId,
+      from: feedback.from,
+      subject: feedback.subject,
+      predicted: feedback.predicted,
+      corrected: feedback.corrected,
+    };
+
+    historyRefs.forEach((historyRef, i) => {
+      const history = (histories[i].data() ?? {}) as Partial<LearnedHistory>;
+      const counts = { ...history.counts };
+      if (previous) counts[previous] = Math.max(0, (counts[previous] ?? 0) - 1);
+      counts[feedback.corrected] = (counts[feedback.corrected] ?? 0) + 1;
+      const examples = [
+        example,
+        ...(history.examples ?? []).filter((e) => e.messageId !== feedback.messageId),
+      ].slice(0, MAX_EXAMPLES);
+      tx.set(historyRef, { counts, examples, updatedAt: FieldValue.serverTimestamp() });
+    });
+
+    tx.set(ref, { ...feedback, correctedAt: FieldValue.serverTimestamp() });
+    return true;
+  });
+}
+
+export async function getLearnedHistory(keys: {
+  sender: string;
+  domain: string | null;
+}): Promise<{ sender: LearnedHistory | null; domain: LearnedHistory | null }> {
+  const [sender, domain] = await Promise.all([
+    senderDoc(keys.sender).get(),
+    keys.domain ? domainDoc(keys.domain).get() : null,
+  ]);
+  const read = (snap: typeof sender | null) =>
+    snap?.exists ? (snap.data() as LearnedHistory) : null;
+  return { sender: read(sender), domain: read(domain) };
 }

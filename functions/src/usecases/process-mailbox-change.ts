@@ -15,7 +15,7 @@ export async function processMailboxChange(notifiedHistoryId: string) {
     return { queued: 0, note: 'stale' };
   }
 
-  const changes = await gmail.listInboxAdditions(lastHistoryId);
+  const changes = await gmail.listChanges(lastHistoryId);
 
   if (!changes) {
     // lastHistoryId too old for Gmail; restart from here
@@ -23,9 +23,26 @@ export async function processMailboxChange(notifiedHistoryId: string) {
     return { queued: 0, note: 'resynced' };
   }
 
+  // A new message's own label changes are this service classifying it, not feedback
+  const added = new Set(changes.messageIds);
+  const labelChanges = changes.labelChanges.filter(
+    (c) => !added.has(c.messageId) && isPossibleFeedback(c),
+  );
+
   // Publish before saving: a crash means duplicates (handled), never lost emails
-  await pubsub.publishClassifyRequests(changes.messageIds);
+  await Promise.all([
+    pubsub.publishClassifyRequests(changes.messageIds),
+    pubsub.publishLabelChanges(labelChanges),
+  ]);
   await db.saveHistoryId(changes.latestHistoryId);
 
-  return { queued: changes.messageIds.length };
+  return { queued: changes.messageIds.length, labelChanges: labelChanges.length };
+}
+
+/** Reading, starring or Gmail's own categories say nothing about the triage decision. */
+function isPossibleFeedback(change: gmail.LabelChange): boolean {
+  return (
+    [...change.added, ...change.removed].some((id) => ['INBOX', 'TRASH', 'SPAM'].includes(id)) ||
+    change.added.some((id) => id.startsWith('Label_')) // user labels, which include AI/*
+  );
 }

@@ -230,6 +230,49 @@ describe('classifyEmail', () => {
     });
   });
 
+  describe('learning from your corrections', () => {
+    const learned = (counts: Record<string, number>) => ({
+      sender: { counts, examples: [] },
+      domain: null,
+    });
+
+    it('archives without the LLM once you only ever archived the sender unread', async () => {
+      vi.mocked(db.getLearnedHistory).mockResolvedValue(learned({ archive: 3 }));
+
+      await expect(classifyEmail(MESSAGE_ID)).resolves.toMatchObject({
+        source: 'learned',
+        label: 'Auto/Learned',
+        archive: true,
+      });
+      expect(anthropic.classifyEmail).not.toHaveBeenCalled();
+    });
+
+    it('passes past corrections to the LLM otherwise', async () => {
+      const history = learned({ archive: 3, keep: 1 });
+      vi.mocked(db.getLearnedHistory).mockResolvedValue(history);
+      llmSays('important');
+
+      await classifyEmail(MESSAGE_ID);
+
+      expect(db.getLearnedHistory).toHaveBeenCalledWith({
+        sender: 'friend@example.com',
+        domain: 'example.com',
+      });
+      expect(anthropic.classifyEmail).toHaveBeenCalledWith(inboxEmail(), history);
+    });
+
+    it('still classifies when learned history cannot be read', async () => {
+      vi.mocked(db.getLearnedHistory).mockRejectedValue(new Error('firestore down'));
+      llmSays('action');
+
+      await expect(classifyEmail(MESSAGE_ID)).resolves.toMatchObject({ label: 'AI/Action' });
+      expect(anthropic.classifyEmail).toHaveBeenCalledWith(inboxEmail(), {
+        sender: null,
+        domain: null,
+      });
+    });
+  });
+
   describe('shadow mode', () => {
     beforeEach(() => {
       settings.shadowMode = true;

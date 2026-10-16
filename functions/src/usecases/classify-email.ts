@@ -4,12 +4,14 @@ import { params } from '../config.js';
 import * as db from '../db/firestore.js';
 import * as anthropic from '../services/anthropic.js';
 import * as gmail from '../services/gmail.js';
+import { LEARNED_ARCHIVE_MIN, learningKeys, shouldAutoArchive } from './learning.js';
 import { IGNORE_RULES, matchRule, RULES } from './rules.js';
 
 /** Auto/* is decided without the LLM (rules, protected senders); AI/* is an LLM decision. */
 const LABELS = {
   autoArchived: 'Auto/Archived',
   autoWouldArchive: 'Auto/WouldArchive',
+  learned: 'Auto/Learned',
   protected: 'Auto/Protected',
   action: 'AI/Action',
   read: 'AI/Read',
@@ -19,7 +21,7 @@ const LABELS = {
 } as const;
 
 interface Decision {
-  source: 'protected' | 'rule' | 'llm';
+  source: 'protected' | 'rule' | 'learned' | 'llm';
   label: string;
   archive: boolean;
   markRead: boolean;
@@ -96,7 +98,18 @@ async function decide(email: gmail.EmailSummary): Promise<Decision> {
     };
   }
 
-  const result = await anthropic.classifyEmail(email);
+  const learned = await getLearned(email.fromAddress);
+  if (shouldAutoArchive(learned.sender)) {
+    return {
+      source: 'learned',
+      label: LABELS.learned,
+      archive: true,
+      markRead: true,
+      reason: `learned: you archived this sender's mail unread ${LEARNED_ARCHIVE_MIN}+ times`,
+    };
+  }
+
+  const result = await anthropic.classifyEmail(email, learned);
   await recordUsage(result.usage);
   const base = {
     source: 'llm',
@@ -116,6 +129,16 @@ async function decide(email: gmail.EmailSummary): Promise<Decision> {
       return { ...base, label: LABELS.read, archive: false, markRead: false };
     case 'archive':
       return { ...base, label: LABELS.archived, archive: true, markRead: true };
+  }
+}
+
+/** Learning is an improvement, not a dependency: without it the LLM decides alone. */
+async function getLearned(address: string): Promise<anthropic.Learned> {
+  try {
+    return (await db.getLearnedHistory(learningKeys(address))) ?? { sender: null, domain: null };
+  } catch (err) {
+    logger.warn('Failed to read learned history', { address, err });
+    return { sender: null, domain: null };
   }
 }
 

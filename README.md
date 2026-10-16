@@ -2,7 +2,7 @@
 
 Triages a personal Gmail inbox automatically. Every new inbox email gets a label, and anything unimportant is archived and marked read. Cheap deterministic rules run first; Claude is only called for mail the rules do not cover.
 
-Runs as three Firebase Cloud Functions (2nd gen, `asia-southeast1`) on top of Gmail push notifications, Pub/Sub and Firestore.
+Runs as four Firebase Cloud Functions (2nd gen, `asia-southeast1`) on top of Gmail push notifications, Pub/Sub and Firestore.
 
 ## How it works
 
@@ -17,6 +17,8 @@ flowchart LR
     F1[onGmailNotification<br/>1 instance, in order]
     F2[onClassifyEmail<br/>up to 5 instances]
     F3[onRenewWatch]
+    T3[[Pub/Sub<br/>email-feedback]]
+    F4[onEmailFeedback]
     DB[(Firestore)]
     LLM([Claude])
 
@@ -26,6 +28,9 @@ flowchart LR
     T1 --> F1
     F1 -- "history.list since last historyId" --> Gmail
     F1 -- "one message per email" --> T2
+    F1 -- "label changes" --> T3
+    T3 --> F4
+    F4 -- "your corrections" --> DB
     F1 <-- "sync/gmail" --> DB
     T2 --> F2
     F2 -- "read metadata, label, archive" --> Gmail
@@ -36,6 +41,7 @@ flowchart LR
 1. **Watch** - `onRenewWatch` asks Gmail to publish inbox changes to the `gmail-notifications` topic. A watch expires after 7 days, so it is renewed daily.
 2. **Sync** - Gmail's notification only carries a `historyId`, not the email. `onGmailNotification` asks Gmail for every message added to the inbox since the last saved `historyId`, publishes one `email-classify` message per email, then saves the new `historyId`. It runs as a single instance so the cursor advances in order.
 3. **Classify** - `onClassifyEmail` handles one email per invocation: decide, apply the label, write the result to Firestore.
+4. **Learn** - the same sync also picks up label changes on mail that was already classified. `onEmailFeedback` works out whether you, not the service, changed the decision and stores that as a correction (see [Learning from you](#learning-from-you)).
 
 ### The classifier
 
@@ -54,26 +60,29 @@ flowchart TD
     E -- yes --> L1[Auto/Protected<br/>keep]
     E -- no --> F{Matches RULES?}
     F -- yes --> L2[Auto/Archived<br/>archive + mark read]
-    F -- no --> G[Ask Claude:<br/>category, confidence, reason]
+    F -- no --> LR{"You archived this sender<br/>unread 3+ times, never kept?"}
+    LR -- yes --> L7[Auto/Learned<br/>archive + mark read]
+    LR -- no --> G[Ask Claude with your past corrections:<br/>category, confidence, reason]
     G --> H{"confidence >= MIN_CONFIDENCE?"}
     H -- no --> L3[AI/Unsure<br/>keep]
     H -- yes --> I{category}
     I -- action --> L4[AI/Action<br/>keep]
     I -- important --> L5[AI/Read<br/>keep]
     I -- archive --> L6[AI/Archived<br/>archive + mark read]
-    L1 & L2 & L3 & L4 & L5 & L6 --> SM{SHADOW_MODE on<br/>and decision archives?}
+    L1 & L2 & L3 & L4 & L5 & L6 & L7 --> SM{SHADOW_MODE on<br/>and decision archives?}
     SM -- yes --> W[Relabel as Auto/WouldArchive or AI/WouldArchive<br/>leave in inbox, unread]
     SM -- no --> AP
     W --> AP[Apply to Gmail in one modify call]
     AP --> LOG[(processed/messageId)]
 ```
 
-Labels tell you who decided: `Auto/*` means no LLM was involved (a rule or a protected sender), `AI/*` means Claude decided.
+Labels tell you who decided: `Auto/*` means no LLM was involved (a rule, a protected sender or a learned sender), `AI/*` means Claude decided.
 
 | Label                                  | Meaning                                        | Archived |
 | -------------------------------------- | ---------------------------------------------- | -------- |
 | `Auto/Protected`                       | Sender is in `NEVER_ARCHIVE`                   | no       |
 | `Auto/Archived`                        | Matched a rule in `RULES`                      | yes      |
+| `Auto/Learned`                         | You only ever archived this sender unread      | yes      |
 | `AI/Action`                            | You need to do something                       | no       |
 | `AI/Read`                              | Worth reading, no action needed                | no       |
 | `AI/Archived`                          | Nothing important                              | yes      |
@@ -81,6 +90,27 @@ Labels tell you who decided: `Auto/*` means no LLM was involved (a rule or a pro
 | `Auto/WouldArchive`, `AI/WouldArchive` | Shadow mode: would have been archived          | no       |
 
 **What Claude sees.** Only metadata: sender address, subject (300 chars), Gmail's snippet (500 chars), Gmail category labels, and whether a `List-Unsubscribe` header exists. The full body is never fetched. The model is forced to answer through a `classify_email` tool call, and the prompt treats email content as untrusted data.
+
+### Learning from you
+
+You never have to tell it anything: it watches what you do with mail it already triaged and learns when you disagree.
+
+| What you do                                         | What it learns                     |
+| --------------------------------------------------- | ---------------------------------- |
+| Move archived mail back to the inbox                | `keep`: should not be archived     |
+| Archive kept mail while it is still **unread**      | `archive`                          |
+| Delete kept mail, or mark it as spam                | `archive`                          |
+| Add `AI/Action`, `AI/Read` or `AI/Archived` by hand | that category                      |
+| Read kept mail, then archive it                     | nothing: this is normal inbox zero |
+
+**Telling you apart from the service.** Gmail does not record who made a change, and the service acts with your own OAuth token, so every change looks like yours. Instead it compares the change with what it did itself, which is stored in `processed/{messageId}`. The service touches each email once, in one modify call: it adds its label and, when archiving, removes `INBOX` and `UNREAD`. Any change outside that (adding `INBOX` back, removing `INBOX` from mail it kept, adding a different label) can only be yours. A change that arrives while the email is still being classified is retried until the classification is done.
+
+**How corrections are used.** Each correction is stored in `feedback/{messageId}` and counted per sender and per domain (public providers like `gmail.com` are only counted per sender).
+
+1. A sender you archived unread at least 3 times and never kept is archived as `Auto/Learned` without calling Claude. One `keep` switches this off for good.
+2. For everything else, Claude gets your latest corrections for that sender and domain with the email, and is told they outweigh its general guidance.
+
+`NEVER_ARCHIVE` and `RULES` always win over anything learned. To undo something it learned, delete the sender's document in `senders/`.
 
 **Shadow mode.** With `SHADOW_MODE=true` nothing is ever archived or marked read. Emails only receive a `*/WouldArchive` label, so you can review the decisions in Gmail before trusting it.
 
@@ -98,6 +128,9 @@ Labels tell you who decided: `Auto/*` means no LLM was involved (a rule or a pro
 | `sync/gmail`            | The `historyId` cursor of the last sync                                                                    |
 | `processed/{messageId}` | Claim state, attempt count, and the decision log (sender, subject, label, reason, confidence, token usage) |
 | `usage/{YYYY-MM-DD}`    | Daily LLM totals in UTC: calls, tokens, estimated cost, split by model                                     |
+| `feedback/{messageId}`  | A correction you made: what the service chose, what you wanted, and the signal it was read from            |
+| `senders/{address}`     | Your corrections for one sender: counts per category and the latest 5 examples                             |
+| `domains/{domain}`      | The same, for every sender on a domain                                                                     |
 
 `costUsd` is an estimate from the price table in `functions/src/services/anthropic-pricing.ts`. Calls to a model missing from that table are counted in `unpricedCalls` instead of being treated as free.
 
@@ -108,7 +141,7 @@ functions/src/
 ├── index.ts          # exports the three functions
 ├── config.ts         # region, topic names, params and secrets
 ├── handlers/         # Firebase triggers: validate the event, call a use case
-├── usecases/         # the logic: process-mailbox-change, classify-email, renew-watch
+├── usecases/         # the logic: process-mailbox-change, classify-email, record-feedback, renew-watch
 │   └── rules.ts      # RULES and IGNORE_RULES - edit this to add your own
 ├── services/         # Gmail, Anthropic and Pub/Sub clients, pricing table
 └── db/               # Firestore reads and writes
