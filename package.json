@@ -9,8 +9,10 @@
   "main": "index.js",
   "scripts": {
     "dev": "pnpm --filter functions serve",
+    "build": "pnpm --filter functions build",
     "deploy": "pnpm exec firebase deploy --only functions",
     "test": "pnpm --filter functions test",
+    "typecheck": "pnpm --filter functions typecheck",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
