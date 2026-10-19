@@ -120,6 +120,43 @@ export async function applyChanges(messageId: string, changes: MessageChanges): 
   });
 }
 
+export interface OutgoingEmail {
+  subject: string;
+  html: string;
+}
+
+/**
+ * Puts an email from the mailbox to itself straight into the inbox, unread.
+ * Insert needs no send scope and skips spam filtering. Returns the new message id.
+ */
+export async function insertIntoInbox(email: OutgoingEmail): Promise<string> {
+  const address = params.gmailAddress.value();
+  const body = Buffer.from(email.html, 'utf8')
+    .toString('base64')
+    .replace(/.{76}(?=.)/g, '$&\r\n');
+  const mime = [
+    `From: email-classifier <${address}>`,
+    `To: ${address}`,
+    `Subject: ${email.subject}`,
+    `Date: ${new Date().toUTCString()}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    body,
+  ].join('\r\n');
+
+  const res = await gmail().users.messages.insert({
+    userId: 'me',
+    internalDateSource: 'dateHeader',
+    requestBody: {
+      raw: Buffer.from(mime, 'utf8').toString('base64url'),
+      labelIds: ['INBOX', 'UNREAD'],
+    },
+  });
+  return res.data.id!;
+}
+
 // ---- internals ----
 
 const labelIdCache = new Map<string, string>();

@@ -2,7 +2,7 @@
 
 Triages a personal Gmail inbox automatically. Every new inbox email gets a label, and anything unimportant is archived and marked read. Cheap deterministic rules run first; Claude is only called for mail the rules do not cover.
 
-Runs as three Firebase Cloud Functions (2nd gen, `asia-southeast1`) on top of Gmail push notifications, Pub/Sub and Firestore.
+Runs as four Firebase Cloud Functions (2nd gen, `asia-southeast1`) on top of Gmail push notifications, Pub/Sub and Firestore.
 
 ## How it works
 
@@ -36,6 +36,7 @@ flowchart LR
 1. **Watch** - `onRenewWatch` asks Gmail to publish inbox changes to the `gmail-notifications` topic. A watch expires after 7 days, so it is renewed daily.
 2. **Sync** - Gmail's notification only carries a `historyId`, not the email. `onGmailNotification` asks Gmail for every message added to the inbox since the last saved `historyId`, publishes one `email-classify` message per email, then saves the new `historyId`. It runs as a single instance so the cursor advances in order.
 3. **Classify** - `onClassifyEmail` handles one email per invocation: decide, apply the label, write the result to Firestore.
+4. **Weekly summary** - every Sunday at 18:00 Bangkok time, `onWeeklySummary` reads the last 7 days of `processed/*` and puts a summary email in the inbox: what was archived (with the reason and a link to find it), what was kept and why, what an ignore rule left untouched, and what failed. It is inserted straight into the inbox from the mailbox to itself, and the classifier skips it.
 
 ### The classifier
 
@@ -105,10 +106,10 @@ Labels tell you who decided: `Auto/*` means no LLM was involved (a rule or a pro
 
 ```text
 functions/src/
-├── index.ts          # exports the three functions
+├── index.ts          # exports the four functions
 ├── config.ts         # region, topic names, params and secrets
 ├── handlers/         # Firebase triggers: validate the event, call a use case
-├── usecases/         # the logic: process-mailbox-change, classify-email, renew-watch
+├── usecases/         # the logic: process-mailbox-change, classify-email, renew-watch, weekly-summary
 │   └── rules.ts      # RULES and IGNORE_RULES - edit this to add your own
 ├── services/         # Gmail, Anthropic and Pub/Sub clients, pricing table
 └── db/               # Firestore reads and writes
