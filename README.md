@@ -65,9 +65,11 @@ flowchart TD
     L1 & L2 & L3 & L4 & L5 & L6 --> SM{SHADOW_MODE on<br/>and decision archives?}
     SM -- yes --> W[Relabel as Auto/WouldArchive or AI/WouldArchive<br/>leave in inbox, unread]
     SM -- no --> AP
-    W --> AP[Apply to Gmail in one modify call]
+    W --> AP[Apply to the whole thread in one modify call<br/>replacing its previous label]
     AP --> LOG[(processed/messageId)]
 ```
+
+**Threads.** Gmail shows a thread with the labels of all its messages, so the decision is applied to the whole thread. Each new message in the thread is classified again, and its label replaces the one the thread had before. A reply that turns a notification thread into something you need to act on moves it from `AI/Archived` to `AI/Action`, and the other way round.
 
 Labels tell you who decided: `Auto/*` means no LLM was involved (a rule or a protected sender), `AI/*` means Claude decided.
 

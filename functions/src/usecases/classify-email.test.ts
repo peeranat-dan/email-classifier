@@ -25,10 +25,12 @@ vi.mock('../services/anthropic.js');
 vi.mock('../services/gmail.js');
 
 const MESSAGE_ID = 'msg-1';
+const THREAD_ID = 'thread-1';
 
 function inboxEmail(overrides: Partial<gmail.EmailSummary> = {}): gmail.EmailSummary {
   return {
     id: MESSAGE_ID,
+    threadId: THREAD_ID,
     fromAddress: 'friend@example.com',
     subject: 'Lunch on Friday?',
     snippet: 'Are you free?',
@@ -81,7 +83,7 @@ describe('classifyEmail', () => {
         await expect(classifyEmail(MESSAGE_ID)).resolves.toEqual({ status: claim });
 
         expect(gmail.getEmail).not.toHaveBeenCalled();
-        expect(gmail.applyChanges).not.toHaveBeenCalled();
+        expect(gmail.applyToThread).not.toHaveBeenCalled();
       },
     );
   });
@@ -93,7 +95,7 @@ describe('classifyEmail', () => {
       await expect(classifyEmail(MESSAGE_ID)).resolves.toEqual({ status: 'skipped' });
 
       expect(db.completeMessage).toHaveBeenCalledWith(MESSAGE_ID, { outcome: 'skipped' });
-      expect(gmail.applyChanges).not.toHaveBeenCalled();
+      expect(gmail.applyToThread).not.toHaveBeenCalled();
     });
 
     it('skips an email that already left the inbox', async () => {
@@ -102,7 +104,7 @@ describe('classifyEmail', () => {
       await expect(classifyEmail(MESSAGE_ID)).resolves.toEqual({ status: 'skipped' });
 
       expect(anthropic.classifyEmail).not.toHaveBeenCalled();
-      expect(gmail.applyChanges).not.toHaveBeenCalled();
+      expect(gmail.applyToThread).not.toHaveBeenCalled();
     });
   });
 
@@ -118,7 +120,7 @@ describe('classifyEmail', () => {
       await expect(classifyEmail(MESSAGE_ID)).resolves.toEqual({ status: 'skipped' });
 
       expect(anthropic.classifyEmail).not.toHaveBeenCalled();
-      expect(gmail.applyChanges).not.toHaveBeenCalled();
+      expect(gmail.applyToThread).not.toHaveBeenCalled();
     });
 
     it('still classifies the same subject from someone else', async () => {
@@ -143,7 +145,7 @@ describe('classifyEmail', () => {
       await expect(classifyEmail(MESSAGE_ID)).resolves.toEqual({ status: 'skipped' });
 
       expect(anthropic.classifyEmail).not.toHaveBeenCalled();
-      expect(gmail.applyChanges).not.toHaveBeenCalled();
+      expect(gmail.applyToThread).not.toHaveBeenCalled();
       expect(db.completeMessage).toHaveBeenCalledWith(MESSAGE_ID, {
         from: 'calendar-notification@google.com',
         subject: 'Daily Agenda for Peeranat Danaidusadeekul as of 5am',
@@ -210,11 +212,14 @@ describe('classifyEmail', () => {
       });
 
       expect(anthropic.classifyEmail).not.toHaveBeenCalled();
-      expect(gmail.applyChanges).toHaveBeenCalledWith(MESSAGE_ID, {
-        addLabels: ['Auto/Archived'],
-        archive: true,
-        markRead: true,
-      });
+      expect(gmail.applyToThread).toHaveBeenCalledWith(
+        THREAD_ID,
+        expect.objectContaining({
+          addLabels: ['Auto/Archived'],
+          archive: true,
+          markRead: true,
+        }),
+      );
     });
   });
 
@@ -231,11 +236,14 @@ describe('classifyEmail', () => {
         await classifyEmail(MESSAGE_ID);
 
         // An archived email is marked read; one kept in the inbox stays unread
-        expect(gmail.applyChanges).toHaveBeenCalledWith(MESSAGE_ID, {
-          addLabels: [label],
-          archive,
-          markRead: archive,
-        });
+        expect(gmail.applyToThread).toHaveBeenCalledWith(
+          THREAD_ID,
+          expect.objectContaining({
+            addLabels: [label],
+            archive,
+            markRead: archive,
+          }),
+        );
       },
     );
 
@@ -256,6 +264,29 @@ describe('classifyEmail', () => {
     });
   });
 
+  describe('threads', () => {
+    it('relabels the whole thread, replacing the label an earlier message got', async () => {
+      llmSays('action');
+
+      await classifyEmail(MESSAGE_ID);
+
+      expect(gmail.applyToThread).toHaveBeenCalledWith(THREAD_ID, {
+        addLabels: ['AI/Action'],
+        removeLabels: [
+          'Auto/Archived',
+          'Auto/WouldArchive',
+          'Auto/Protected',
+          'AI/Read',
+          'AI/Archived',
+          'AI/Unsure',
+          'AI/WouldArchive',
+        ],
+        archive: false,
+        markRead: false,
+      });
+    });
+  });
+
   describe('shadow mode', () => {
     beforeEach(() => {
       settings.shadowMode = true;
@@ -266,11 +297,14 @@ describe('classifyEmail', () => {
 
       await classifyEmail(MESSAGE_ID);
 
-      expect(gmail.applyChanges).toHaveBeenCalledWith(MESSAGE_ID, {
-        addLabels: ['Auto/WouldArchive'],
-        archive: false,
-        markRead: false,
-      });
+      expect(gmail.applyToThread).toHaveBeenCalledWith(
+        THREAD_ID,
+        expect.objectContaining({
+          addLabels: ['Auto/WouldArchive'],
+          archive: false,
+          markRead: false,
+        }),
+      );
     });
 
     it('only labels what the LLM would have archived', async () => {
@@ -278,11 +312,14 @@ describe('classifyEmail', () => {
 
       await classifyEmail(MESSAGE_ID);
 
-      expect(gmail.applyChanges).toHaveBeenCalledWith(MESSAGE_ID, {
-        addLabels: ['AI/WouldArchive'],
-        archive: false,
-        markRead: false,
-      });
+      expect(gmail.applyToThread).toHaveBeenCalledWith(
+        THREAD_ID,
+        expect.objectContaining({
+          addLabels: ['AI/WouldArchive'],
+          archive: false,
+          markRead: false,
+        }),
+      );
     });
 
     it('leaves decisions that keep the email unchanged', async () => {
@@ -344,7 +381,7 @@ describe('classifyEmail', () => {
 
     it('still counts a call whose email then fails to update', async () => {
       llmSays('action');
-      vi.mocked(gmail.applyChanges).mockRejectedValue(new Error('gmail is down'));
+      vi.mocked(gmail.applyToThread).mockRejectedValue(new Error('gmail is down'));
 
       await expect(classifyEmail(MESSAGE_ID)).rejects.toThrow();
 
@@ -363,7 +400,7 @@ describe('classifyEmail', () => {
     it('marks the message failed and rethrows so Pub/Sub retries', async () => {
       const error = new Error('gmail is down');
       llmSays('action');
-      vi.mocked(gmail.applyChanges).mockRejectedValue(error);
+      vi.mocked(gmail.applyToThread).mockRejectedValue(error);
 
       await expect(classifyEmail(MESSAGE_ID)).rejects.toThrow(error);
 

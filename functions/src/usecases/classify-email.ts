@@ -19,6 +19,8 @@ const LABELS = {
   wouldArchive: 'AI/WouldArchive',
 } as const;
 
+const ALL_LABELS: string[] = Object.values(LABELS);
+
 interface Decision {
   source: 'protected' | 'rule' | 'llm';
   label: string;
@@ -61,8 +63,10 @@ export async function classifyEmail(messageId: string) {
 
     const decision = applyShadowMode(await decide(email));
 
-    await gmail.applyChanges(messageId, {
+    // The newest message decides for the whole thread, replacing any earlier label
+    await gmail.applyToThread(email.threadId, {
       addLabels: [decision.label],
+      removeLabels: ALL_LABELS.filter((label) => label !== decision.label),
       archive: decision.archive,
       markRead: decision.markRead,
     });

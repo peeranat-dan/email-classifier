@@ -4,6 +4,7 @@ import { params, secrets } from '../config.js';
 
 export interface EmailSummary {
   id: string;
+  threadId: string;
   fromAddress: string;
   subject: string;
   snippet: string;
@@ -86,6 +87,7 @@ export async function getEmail(messageId: string): Promise<EmailSummary | null> 
 
     return {
       id: messageId,
+      threadId: res.data.threadId ?? messageId,
       fromAddress: extractAddress(header('From')),
       subject: header('Subject'),
       snippet: res.data.snippet ?? '',
@@ -98,24 +100,27 @@ export async function getEmail(messageId: string): Promise<EmailSummary | null> 
   }
 }
 
-export interface MessageChanges {
+export interface ThreadChanges {
   addLabels: string[];
+  /** Taken off every message in the thread; labels that do not exist yet are ignored. */
+  removeLabels: string[];
   archive: boolean;
   markRead: boolean;
 }
 
-/** One atomic modify call: label, archive and mark-read together. */
-export async function applyChanges(messageId: string, changes: MessageChanges): Promise<void> {
+/** One atomic modify call over every message in the thread: label, archive and mark-read together. */
+export async function applyToThread(threadId: string, changes: ThreadChanges): Promise<void> {
   const addLabelIds = await Promise.all(changes.addLabels.map(getOrCreateLabelId));
   const removeLabelIds = [
+    ...(await findLabelIds(changes.removeLabels)).filter((id) => !addLabelIds.includes(id)),
     ...(changes.archive ? ['INBOX'] : []),
     ...(changes.markRead ? ['UNREAD'] : []),
   ];
   if (addLabelIds.length === 0 && removeLabelIds.length === 0) return;
 
-  await gmail().users.messages.modify({
+  await gmail().users.threads.modify({
     userId: 'me',
-    id: messageId,
+    id: threadId,
     requestBody: { addLabelIds, removeLabelIds },
   });
 }
@@ -187,6 +192,18 @@ async function getOrCreateLabelId(name: string): Promise<string> {
 async function findLabelId(name: string): Promise<string | undefined> {
   const res = await gmail().users.labels.list({ userId: 'me' });
   return res.data.labels?.find((l) => l.name === name)?.id ?? undefined;
+}
+
+/** Ids of the labels that exist; missing ones are left out rather than created. */
+async function findLabelIds(names: string[]): Promise<string[]> {
+  const missing = names.filter((name) => !labelIdCache.has(name));
+  if (missing.length > 0) {
+    const res = await gmail().users.labels.list({ userId: 'me' });
+    for (const label of res.data.labels ?? []) {
+      if (label.name && label.id && missing.includes(label.name)) cacheLabel(label.name, label.id);
+    }
+  }
+  return names.flatMap((name) => labelIdCache.get(name) ?? []);
 }
 
 function cacheLabel(name: string, id: string): string {
