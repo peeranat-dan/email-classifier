@@ -3,11 +3,11 @@
   "private": true,
   "main": "lib/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "build:watch": "tsc -p tsconfig.build.json --watch",
+    "build": "tsrs -p tsconfig.build.json",
+    "build:watch": "tsrs -p tsconfig.build.json --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "serve": "pnpm run build && firebase emulators:start --only functions",
     "shell": "pnpm run build && firebase functions:shell",
     "start": "pnpm run shell",
@@ -22,7 +22,6 @@
     "firebase-functions": "7.0.0"
   },
   "devDependencies": {
-    "typescript": "7.0.2",
     "vitest": "5.0.3"
   },
   "engines": {
