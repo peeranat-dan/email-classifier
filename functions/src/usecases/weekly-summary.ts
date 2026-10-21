@@ -1,13 +1,14 @@
 import { params } from '../config.js';
 import * as db from '../db/firestore.js';
 import * as gmail from '../services/gmail.js';
+import { HISTORY_WEEKS, type Recommendation, recommend } from './recommendations.js';
 
 /** The classifier skips mail from the mailbox itself with this subject prefix. */
 export const SUMMARY_SUBJECT_PREFIX = '[email-classifier] Weekly summary';
 
 export const SUMMARY_TIME_ZONE = 'Asia/Bangkok';
 
-const PERIOD_MS = 7 * 24 * 60 * 60_000;
+const WEEK_MS = 7 * 24 * 60 * 60_000;
 
 /** Why an email was kept in the inbox, in the order the summary lists them. */
 const KEPT_REASONS: Record<string, string> = {
@@ -20,9 +21,10 @@ const KEPT_REASONS: Record<string, string> = {
 };
 
 export async function sendWeeklySummary(now = new Date()) {
-  const since = new Date(now.getTime() - PERIOD_MS);
-  const records = await db.listProcessedSince(since);
-  const summary = buildSummary(records, { since, until: now });
+  const since = new Date(now.getTime() - WEEK_MS);
+  const history = await db.listProcessedSince(new Date(now.getTime() - HISTORY_WEEKS * WEEK_MS));
+  const week = history.filter((r) => r.status === 'failed' || (r.doneAt && r.doneAt >= since));
+  const summary = buildSummary(week, { since, until: now }, recommend(history, SUMMARY_TIME_ZONE));
   const messageId = await gmail.insertIntoInbox(summary);
   return { messageId, ...summary.counts };
 }
@@ -32,7 +34,11 @@ interface Period {
   until: Date;
 }
 
-export function buildSummary(records: db.ProcessedRecord[], period: Period) {
+export function buildSummary(
+  records: db.ProcessedRecord[],
+  period: Period,
+  recommendations: Recommendation[] = [],
+) {
   const archived = records.filter((r) => r.status === 'done' && r.outcome === 'archived');
   const kept = records.filter((r) => r.status === 'done' && r.outcome === 'kept');
   // Skipped mail without a sender left the inbox before we saw it, or is a previous summary
@@ -52,6 +58,8 @@ export function buildSummary(records: db.ProcessedRecord[], period: Period) {
     `<h2>Inbox triage, ${escapeHtml(range)}</h2>`,
     `<p>${counts.archived} archived, ${counts.kept} kept in the inbox, ` +
       `${counts.ignored} left untouched, ${counts.failed} failed.</p>`,
+
+    recommendationSection(recommendations),
 
     section(`Archived (${counts.archived})`, [
       group(
@@ -97,6 +105,15 @@ export function buildSummary(records: db.ProcessedRecord[], period: Period) {
 function section(title: string, groups: string[]): string {
   const body = groups.filter(Boolean).join('\n');
   return `<h3>${escapeHtml(title)}</h3>\n${body || '<p>None.</p>'}`;
+}
+
+function recommendationSection(recommendations: Recommendation[]): string {
+  const rows = recommendations
+    .map((r) => `<li><b>${escapeHtml(r.action)}</b><br><small>${escapeHtml(r.why)}</small></li>`)
+    .join('\n');
+  return section(`Recommended actions (${recommendations.length})`, [
+    rows ? `<ul>\n${rows}\n</ul>` : '',
+  ]);
 }
 
 function group(title: string, records: db.ProcessedRecord[]): string {

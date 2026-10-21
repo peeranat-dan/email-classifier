@@ -126,33 +126,55 @@ describe('buildSummary', () => {
     expect(html).not.toContain('<script>');
   });
 
+  it('lists recommended actions first, before the triage sections', () => {
+    const { html } = buildSummary([], PERIOD, [
+      { action: 'Unsubscribe from <news>@example.com', why: '4 emails, all archived.' },
+    ]);
+
+    const recommended = sectionOf(html, 'Recommended actions');
+    expect(recommended).toContain('Recommended actions (1)');
+    expect(recommended).toContain('Unsubscribe from &lt;news&gt;@example.com');
+    expect(recommended).toContain('4 emails, all archived.');
+    expect(html.indexOf('Recommended actions')).toBeLessThan(html.indexOf('<h3>Archived'));
+  });
+
   it('says None for an empty section', () => {
     const { html } = buildSummary([], PERIOD);
 
     expect(sectionOf(html, 'Archived')).toContain('None.');
+    expect(sectionOf(html, 'Recommended actions')).toContain('None.');
   });
 });
 
 describe('sendWeeklySummary', () => {
+  const lastWeek = new Date('2026-10-08T03:00:00Z');
+  const threeWeeksAgo = new Date('2026-09-22T03:00:00Z');
+  const news = (id: string, doneAt: Date) =>
+    record({ id, outcome: 'archived', label: 'AI/Archived', from: 'news@example.com', doneAt });
+
   beforeEach(() => {
     vi.mocked(db.listProcessedSince).mockResolvedValue([
-      record({ outcome: 'archived', label: 'Auto/Archived' }),
+      news('a', lastWeek),
+      news('b', threeWeeksAgo),
+      news('c', threeWeeksAgo),
+      news('d', threeWeeksAgo),
+      record({ id: 'e', status: 'failed', attempts: 1, error: 'timeout' }),
     ]);
     vi.mocked(gmail.insertIntoInbox).mockResolvedValue('summary-1');
   });
 
-  it('covers the 7 days before now and puts the summary in the inbox', async () => {
+  it('summarizes the last 7 days and recommends from the last 4 weeks', async () => {
     await expect(sendWeeklySummary(PERIOD.until)).resolves.toEqual({
       messageId: 'summary-1',
       archived: 1,
       kept: 0,
       ignored: 0,
-      failed: 0,
+      failed: 1,
     });
 
-    expect(db.listProcessedSince).toHaveBeenCalledWith(PERIOD.since);
-    expect(gmail.insertIntoInbox).toHaveBeenCalledWith(
-      expect.objectContaining({ subject: expect.stringContaining('1 archived') }),
-    );
+    expect(db.listProcessedSince).toHaveBeenCalledWith(new Date('2026-09-13T11:00:00Z'));
+    const { subject, html } = vi.mocked(gmail.insertIntoInbox).mock.calls[0][0];
+    expect(subject).toContain('1 archived');
+    expect(sectionOf(html, 'Recommended actions')).toContain('Unsubscribe from news@example.com');
   });
 });
