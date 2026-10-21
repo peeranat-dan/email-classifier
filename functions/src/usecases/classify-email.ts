@@ -74,6 +74,7 @@ export async function classifyEmail(messageId: string) {
     await db.completeMessage(messageId, {
       from: email.fromAddress,
       subject: email.subject,
+      listUnsubscribe: email.hasListUnsubscribe,
       outcome: decision.archive ? 'archived' : 'kept',
       ...decision,
     });

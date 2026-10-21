@@ -338,6 +338,7 @@ describe('classifyEmail', () => {
       expect(db.completeMessage).toHaveBeenCalledWith(MESSAGE_ID, {
         from: 'friend@example.com',
         subject: 'Lunch on Friday?',
+        listUnsubscribe: false,
         outcome: 'archived',
         source: 'llm',
         label: 'AI/Archived',

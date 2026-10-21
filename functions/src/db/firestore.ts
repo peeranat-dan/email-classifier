@@ -81,6 +81,9 @@ export interface ProcessedRecord {
   label?: string;
   reason?: string;
   confidence?: number;
+  /** Whether the email had a List-Unsubscribe header; missing on records from before it was logged. */
+  listUnsubscribe?: boolean;
+  doneAt?: Date;
   error?: string;
 }
 
@@ -94,7 +97,12 @@ export async function listProcessedSince(since: Date): Promise<ProcessedRecord[]
   ]);
 
   return [...done.docs, ...failed.docs].map(
-    (doc) => ({ id: doc.id, ...doc.data() }) as ProcessedRecord,
+    (doc) =>
+      ({
+        id: doc.id,
+        ...doc.data(),
+        doneAt: (doc.get('doneAt') as Timestamp | undefined)?.toDate(),
+      }) as ProcessedRecord,
   );
 }
 
