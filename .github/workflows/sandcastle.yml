@@ -1,0 +1,108 @@
+name: Sandcastle
+
+# Add the `sandcastle` label to an issue (or run manually with an issue number)
+# and a Claude Code agent implements it on a new branch, then opens a draft PR.
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to implement'
+        required: true
+        type: number
+
+jobs:
+  implement:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'sandcastle'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: sandcastle-issue-${{ github.event.issue.number || inputs.issue_number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          # A PAT lets the opened PR trigger the CI workflow; GITHUB_TOKEN pushes do not.
+          token: ${{ secrets.AGENT_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Mark issue in progress
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --remove-label "sandcastle" || true
+          gh issue edit "$ISSUE_NUMBER" --add-label "sandcastle:in-progress" || true
+
+      - name: Create branch
+        id: branch
+        run: |
+          branch="sandcastle/issue-${ISSUE_NUMBER}"
+          git config user.name "sandcastle-agent[bot]"
+          git config user.email "sandcastle-agent[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          echo "name=$branch" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+
+      - name: Run Sandcastle agent
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          SANDCASTLE_MODEL: ${{ vars.SANDCASTLE_MODEL }}
+        run: pnpm sandcastle
+
+      - name: Push branch
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: git push --force origin "$BRANCH"
+
+      - name: Open draft PR
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+          GH_TOKEN: ${{ secrets.AGENT_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')" ]; then
+            echo "PR for $BRANCH already open; branch updated."
+            exit 0
+          fi
+          title=$(gh issue view "$ISSUE_NUMBER" --json title --jq '.title')
+          gh pr create --draft \
+            --base "$BASE_BRANCH" \
+            --head "$BRANCH" \
+            --title "${title:0:240}" \
+            --body "Closes #${ISSUE_NUMBER}
+
+          Implemented by the Sandcastle agent workflow."
+
+      - name: Report failure
+        if: failure()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "Sandcastle run failed: $RUN_URL. Re-add the \`sandcastle\` label to retry."
+
+      - name: Clear in-progress label
+        if: always()
+        run: gh issue edit "$ISSUE_NUMBER" --remove-label "sandcastle:in-progress" || true
