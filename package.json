@@ -18,9 +18,11 @@
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "knip": "knip",
-    "prepare": "husky"
+    "prepare": "husky",
+    "sandcastle": "tsx .sandcastle/main.ts"
   },
   "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
     "@chanom/dev-config": "0.0.4",
     "@commitlint/cli": "21.2.3",
     "@commitlint/config-conventional": "21.2.3",
@@ -30,7 +32,8 @@
     "lint-staged": "17.6.0",
     "oxfmt": "0.58.0",
     "oxlint": "1.73.0",
-    "oxlint-tsgolint": "0.24.0"
+    "oxlint-tsgolint": "0.24.0",
+    "tsx": "4.23.15"
   },
   "packageManager": "pnpm@12.11.2"
 }
