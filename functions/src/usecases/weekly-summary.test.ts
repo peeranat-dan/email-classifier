@@ -28,10 +28,12 @@ function record(overrides: Partial<db.ProcessedRecord>): db.ProcessedRecord {
 
 /** The text of one section, up to the next section heading. */
 function sectionOf(html: string, title: string): string {
-  const start = html.indexOf(`<h3>${title}`);
-  expect(start).toBeGreaterThanOrEqual(0);
-  const end = html.indexOf('<h3>', start + 1);
-  return html.slice(start, end === -1 ? undefined : end);
+  const section = html
+    .split('<h2')
+    .slice(1)
+    .find((s) => s.includes(`>${title}`));
+  expect(section).toBeDefined();
+  return section!;
 }
 
 describe('buildSummary', () => {
@@ -69,7 +71,7 @@ describe('buildSummary', () => {
     expect(archived).toContain('Archived by Claude (1)');
     expect(archived).toContain('Big sale');
     expect(archived).toContain('shop@example.com');
-    expect(archived).toContain('marketing (confidence 0.95)');
+    expect(archived).toMatch(/marketing\s*<span[^>]*>[^<]*confidence 0.95\s*</);
     expect(archived).toContain(
       'href="https://mail.google.com/mail/?authuser=me%40example.com#all/abc123"',
     );
@@ -132,10 +134,12 @@ describe('buildSummary', () => {
     ]);
 
     const recommended = sectionOf(html, 'Recommended actions');
-    expect(recommended).toContain('Recommended actions (1)');
+    expect(recommended).toMatch(/Recommended actions\s*<span[^>]*>\s*1\s*</);
     expect(recommended).toContain('Unsubscribe from &lt;news&gt;@example.com');
     expect(recommended).toContain('4 emails, all archived.');
-    expect(html.indexOf('Recommended actions')).toBeLessThan(html.indexOf('<h3>Archived'));
+    expect(html.indexOf('Recommended actions')).toBeLessThan(
+      html.indexOf(sectionOf(html, 'Archived')),
+    );
   });
 
   it('says None for an empty section', () => {

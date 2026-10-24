@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { params } from '../config.js';
 import * as db from '../db/firestore.js';
 import * as gmail from '../services/gmail.js';
@@ -54,87 +57,169 @@ export function buildSummary(
   const range = `${formatDate(period.since)} - ${formatDate(period.until)}`;
   const subject = `${SUMMARY_SUBJECT_PREFIX}: ${counts.archived} archived, ${counts.kept} kept (${range})`;
 
-  const html = [
-    `<h2>Inbox triage, ${escapeHtml(range)}</h2>`,
-    `<p>${counts.archived} archived, ${counts.kept} kept in the inbox, ` +
-      `${counts.ignored} left untouched, ${counts.failed} failed.</p>`,
+  const html = render(layout, {
+    subject: escapeHtml(subject),
+    preheader: escapeHtml(
+      `${counts.archived} archived, ${counts.kept} kept, ${recommendations.length} recommended actions`,
+    ),
+    range: escapeHtml(range),
+    headline: escapeHtml(
+      `${counts.archived} archived, ${counts.kept} kept in the inbox, ` +
+        `${counts.ignored} left untouched, ${counts.failed} failed.`,
+    ),
+    stats: OUTCOMES.map(({ key, label, color }) =>
+      render(blocks.stat, { value: String(counts[key]), label, color }),
+    ).join(''),
+    bar: bar(counts),
+    sections: [
+      recommendationSection(recommendations),
 
-    recommendationSection(recommendations),
-
-    section(`Archived (${counts.archived})`, [
-      group(
-        'Archived by a rule',
-        archived.filter((r) => r.label === 'Auto/Archived'),
-      ),
-      group(
-        'Archived by Claude',
-        archived.filter((r) => r.label !== 'Auto/Archived'),
-      ),
-    ]),
-
-    section(`Kept in the inbox (${counts.kept})`, [
-      ...Object.entries(KEPT_REASONS).map(([label, why]) =>
+      section('Archived', OUTCOME_COLORS.archived, counts.archived, [
         group(
-          why,
-          kept.filter((r) => r.label === label),
+          'Archived by a rule',
+          archived.filter((r) => r.label === 'Auto/Archived'),
         ),
-      ),
-      group(
-        'Other',
-        kept.filter((r) => !r.label || !(r.label in KEPT_REASONS)),
-      ),
-    ]),
+        group(
+          'Archived by Claude',
+          archived.filter((r) => r.label !== 'Auto/Archived'),
+        ),
+      ]),
 
-    section(`Left untouched by an ignore rule (${counts.ignored})`, [group('', ignored)]),
+      section('Kept in the inbox', OUTCOME_COLORS.kept, counts.kept, [
+        ...Object.entries(KEPT_REASONS).map(([label, why]) =>
+          group(
+            why,
+            kept.filter((r) => r.label === label),
+          ),
+        ),
+        group(
+          'Other',
+          kept.filter((r) => !r.label || !(r.label in KEPT_REASONS)),
+        ),
+      ]),
 
-    section(`Could not be classified (${counts.failed})`, [
-      group(
-        'Gave up after the maximum attempts',
-        failed.filter((r) => (r.attempts ?? 0) >= db.MAX_ATTEMPTS),
-      ),
-      group(
-        'Still retrying',
-        failed.filter((r) => (r.attempts ?? 0) < db.MAX_ATTEMPTS),
-      ),
-    ]),
-  ].join('\n');
+      section('Left untouched by an ignore rule', OUTCOME_COLORS.ignored, counts.ignored, [
+        group('', ignored),
+      ]),
+
+      section('Could not be classified', OUTCOME_COLORS.failed, counts.failed, [
+        group(
+          'Gave up after the maximum attempts',
+          failed.filter((r) => (r.attempts ?? 0) >= db.MAX_ATTEMPTS),
+        ),
+        group(
+          'Still retrying',
+          failed.filter((r) => (r.attempts ?? 0) < db.MAX_ATTEMPTS),
+        ),
+      ]),
+    ].join('\n'),
+  });
 
   return { subject, html, counts };
 }
 
-function section(title: string, groups: string[]): string {
-  const body = groups.filter(Boolean).join('\n');
-  return `<h3>${escapeHtml(title)}</h3>\n${body || '<p>None.</p>'}`;
+// ---- internals ----
+
+type Counts = Record<'archived' | 'kept' | 'ignored' | 'failed', number>;
+
+const OUTCOME_COLORS: Record<keyof Counts, string> = {
+  archived: '#3f6b5c',
+  kept: '#c7832b',
+  ignored: '#b8b0a3',
+  failed: '#b4442f',
+};
+
+/** The stat tiles and bar segments, left to right. */
+const OUTCOMES: { key: keyof Counts; label: string; color: string }[] = [
+  { key: 'archived', label: 'Archived', color: OUTCOME_COLORS.archived },
+  { key: 'kept', label: 'Kept', color: OUTCOME_COLORS.kept },
+  { key: 'ignored', label: 'Ignored', color: OUTCOME_COLORS.ignored },
+  { key: 'failed', label: 'Failed', color: OUTCOME_COLORS.failed },
+];
+
+const RECOMMENDATION_COLOR = '#1c1917';
+
+/** The template's layout, with each block cut out into `blocks`. */
+const { layout, blocks } = parseTemplate(
+  readFileSync(join(__dirname, '../../templates/weekly-summary.html'), 'utf8'),
+);
+
+function parseTemplate(template: string) {
+  const blocks: Record<string, string> = {};
+  const layout = template.replace(
+    /[ \t]*<!-- block:([\w-]+) -->\n?([\s\S]*?)[ \t]*<!-- \/block:\1 -->\n?/g,
+    (_, name: string, body: string) => {
+      blocks[name] = body;
+      return '';
+    },
+  );
+  // The template's notes are for whoever edits it, not for the email
+  return { layout: layout.replace(/[ \t]*<!--[\s\S]*?-->\n?/g, ''), blocks };
+}
+
+/** Fills each {{name}} in `template`; values must already be HTML-escaped. */
+function render(template: string | undefined, values: Record<string, string>): string {
+  if (template === undefined) throw new Error('Missing block in weekly-summary.html');
+  return template.replace(/\{\{(\w+)\}\}/g, (match, name: string) => values[name] ?? match);
+}
+
+function bar(counts: Counts): string {
+  const total = OUTCOMES.reduce((sum, { key }) => sum + counts[key], 0);
+  return OUTCOMES.filter(({ key }) => counts[key] > 0)
+    .map(({ key, color }) =>
+      render(blocks['bar-segment'], {
+        width: String(Math.round((counts[key] / total) * 1000) / 10),
+        color,
+      }),
+    )
+    .join('');
+}
+
+function section(title: string, accent: string, count: number, parts: string[]): string {
+  const body = parts.filter(Boolean).join('\n');
+  return render(blocks.section, {
+    title: escapeHtml(title),
+    accent,
+    count: String(count),
+    body: body || render(blocks.empty, {}),
+  });
 }
 
 function recommendationSection(recommendations: Recommendation[]): string {
-  const rows = recommendations
-    .map((r) => `<li><b>${escapeHtml(r.action)}</b><br><small>${escapeHtml(r.why)}</small></li>`)
-    .join('\n');
-  return section(`Recommended actions (${recommendations.length})`, [
-    rows ? `<ul>\n${rows}\n</ul>` : '',
-  ]);
+  return section(
+    'Recommended actions',
+    RECOMMENDATION_COLOR,
+    recommendations.length,
+    recommendations.map((r) =>
+      render(blocks.recommendation, { action: escapeHtml(r.action), why: escapeHtml(r.why) }),
+    ),
+  );
 }
 
 function group(title: string, records: db.ProcessedRecord[]): string {
   if (records.length === 0) return '';
-  const heading = title ? `<h4>${escapeHtml(title)} (${records.length})</h4>\n` : '';
-  const rows = records
+  const heading = title
+    ? render(blocks['group-heading'], { title: escapeHtml(title), count: String(records.length) })
+    : '';
+  const items = records
     .map((r) => {
       const link = `https://mail.google.com/mail/?authuser=${encodeURIComponent(
         params.gmailAddress.value(),
       )}#all/${encodeURIComponent(r.id)}`;
       const why = r.status === 'failed' ? r.error : r.reason;
-      const confidence = r.confidence === undefined ? '' : ` (confidence ${r.confidence})`;
-      return (
-        `<li><a href="${escapeHtml(link)}">${escapeHtml(r.subject || '(no subject)')}</a>` +
-        ` from ${escapeHtml(r.from || 'unknown sender')}` +
-        (why ? `<br><small>${escapeHtml(why + confidence)}</small>` : '') +
-        `</li>`
-      );
+      const confidence =
+        r.confidence === undefined
+          ? ''
+          : render(blocks.confidence, { value: escapeHtml(String(r.confidence)) });
+      return render(blocks.item, {
+        link: escapeHtml(link),
+        subject: escapeHtml(r.subject || '(no subject)'),
+        from: escapeHtml(r.from || 'unknown sender'),
+        details: why ? render(blocks.details, { why: escapeHtml(why), confidence }) : '',
+      });
     })
-    .join('\n');
-  return `${heading}<ul>\n${rows}\n</ul>`;
+    .join('');
+  return heading + render(blocks.list, { items });
 }
 
 function formatDate(date: Date): string {
